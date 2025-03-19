@@ -1,0 +1,19 @@
+name: ui-comparator
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - pip
+  - numpy
+  - opencv
+  - scikit-image
+  - scikit-learn
+  - matplotlib
+  - pytorch
+  - pillow
+  - scipy
+  - pip:
+    - paddlepaddle
+    - paddleocr
+    - transformers
