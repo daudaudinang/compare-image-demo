@@ -20,9 +20,9 @@ class ResultVisualizer:
             x, y, w, h = element['bbox']
             cv2.rectangle(result, (x, y), (x+w, y+h), color, 2)
             
-            if show_indices:
-                cv2.putText(result, f"UI-{i}", (x, y-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            # if show_indices:
+            #     cv2.putText(result, f"UI-{i}", (x, y-5), 
+            #                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         
         return result
     

@@ -27,8 +27,10 @@ class UISegmenter:
         # 4. Kết hợp tất cả elements
         all_elements = merged_texts + edge_elements
 
-        # 5. Lọc elements chồng lấp
-        filtered_elements = self.filter_overlapping_elements(all_elements)
+        # 5. Lọc các elements chồng lấn
+        merged_elements = self.merge_hierarchical_boxes(all_elements)
+
+        filtered_elements = self.filter_overlapping_elements(merged_elements)
 
         return filtered_elements
     
@@ -82,7 +84,7 @@ class UISegmenter:
         
         return text_elements
 
-    def merge_hierarchical_boxes(boxes, containment_threshold=0.8, overlap_threshold=0.3):
+    def merge_hierarchical_boxes(self, boxes, containment_threshold=0.7, overlap_threshold=0.5):
         """
         Gộp các bounding box theo quan hệ chứa nhau hoặc chồng lấn.
         - Nếu box A chứa box B hoặc có phần giao lớn hơn ngưỡng overlap_threshold, thì A và B sẽ được gộp.
@@ -304,15 +306,20 @@ class UISegmenter:
 
     def filter_overlapping_elements(self, elements):
         """
-        Lọc các elements chồng lấn, chỉ giữ lại các elements không nằm trong elements khác
+        Lọc các elements chồng lấn, ưu tiên giữ lại text elements.
         """
         if not elements:
             return []
 
-        # Sắp xếp elements theo diện tích (lớn đến nhỏ)
-        sorted_elements = sorted(elements,
-                                 key=lambda e: e['bbox'][2] * e['bbox'][3],
-                                 reverse=True)
+        # Tách text elements và non-text elements
+        text_elements = [e for e in elements if e.get('type') == 'text']
+        non_text_elements = [e for e in elements if e.get('type') != 'text']
+
+        # Sắp xếp text_elements theo diện tích (lớn đến nhỏ) - nếu cần
+        text_elements.sort(key=lambda e: e['bbox'][2] * e['bbox'][3], reverse=True)
+
+        # Gộp text và non-text, với text ở đầu
+        sorted_elements = text_elements + non_text_elements
 
         # Lọc các elements nằm hoàn toàn trong elements khác
         result = []
@@ -446,91 +453,133 @@ class UISegmenter:
         return merged_texts + non_text_elements
 
     def merge_text_elements(self, elements):
-        """
-        Gộp text elements theo hàng dọc và ngang
-        """
-        # Tách text và non-text elements
+        """Gộp các text box gần nhau (mở rộng bbox và kiểm tra giao nhau)."""
         text_elements = [e for e in elements if e.get('type') == 'text']
         non_text_elements = [e for e in elements if e.get('type') != 'text']
 
-        if len(text_elements) <= 1:
+        if not text_elements:
             return elements
 
-        # Xác định text gần nhau theo trục Y
-        y_groups = {}
-        for element in text_elements:
-            _, y, _, h = element['bbox']
-            center_y = y + h / 2
+        # --- (Phần mở rộng bbox và gộp giữ nguyên) ---
+        # 1. Mở rộng bbox
+        expanded_boxes = []
+        for elem in text_elements:
+            x, y, w, h = elem['bbox']
+            y_top_expansion = int(h * 0.25)  # 25% chiều cao
+            y_bottom_expansion = int(h * 0.25)
 
-            # Tìm nhóm phù hợp
-            assigned = False
-            for group_center_y in list(y_groups.keys()):
-                if abs(center_y - group_center_y) < 15:  # Ngưỡng cố định cho khoảng cách Y
-                    y_groups[group_center_y].append(element)
-                    assigned = True
-                    break
+            new_y = max(0, y - y_top_expansion)  # Đảm bảo không vượt quá biên trên
+            new_h = h + y_top_expansion + y_bottom_expansion
 
-            # Tạo nhóm mới nếu không tìm thấy nhóm phù hợp
-            if not assigned:
-                y_groups[center_y] = [element]
+            # Cập nhật cả 'bbox' và 'contour' (nếu có)
+            new_bbox = (x, new_y, w, new_h)
+            new_contour = None
+            if 'contour' in elem and elem['contour'] is not None:  # Kiểm tra contour
+                # Cập nhật contour (giả sử contour là một numpy array)
+                new_contour = elem['contour'].copy()
+                new_contour[:, 0, 1] = new_contour[:, 0, 1] - y + new_y
 
-        # Gộp text trong mỗi nhóm Y theo trục X
-        merged_elements = []
+            expanded_boxes.append({
+                'bbox': new_bbox,
+                'text': elem.get('text', ''),
+                'type': 'text',
+                'merged': False,  # Ban đầu, chưa box nào được gộp
+                'confidence': elem.get('confidence', 0),
+                'roi': elem.get('roi', None),
+                'contour':new_contour,
+                'original_bbox': elem['bbox'], #Lưu lại original
+                'original_contour': elem.get('contour',None) #Lưu lại original
+            })
 
-        for group_center_y, group_elements in y_groups.items():
-            # Sắp xếp theo X
-            group_elements.sort(key=lambda e: e['bbox'][0])
+        # 2. Kiểm tra giao nhau và gộp
+        merged_boxes = []
+        while True:
+            merged = False  # Đánh dấu xem có cặp nào được gộp trong vòng lặp này không
+            used = [False] * len(expanded_boxes)  # Đánh dấu các box đã được gộp
 
-            # Gộp các elements gần nhau
-            current_group = [group_elements[0]]
-            result_groups = []
+            for i in range(len(expanded_boxes)):
+                if used[i]:
+                    continue
 
-            for i in range(1, len(group_elements)):
-                current_element = group_elements[i]
-                prev_element = current_group[-1]
+                current_box = expanded_boxes[i]
+                current_group = [current_box]
+                used[i] = True
 
-                # Lấy vị trí
-                x1, _, w1, _ = prev_element['bbox']
-                x2, _, _, _ = current_element['bbox']
+                for j in range(i + 1, len(expanded_boxes)):
+                    if used[j]:
+                        continue
 
-                # Khoảng cách theo X
-                distance = x2 - (x1 + w1)
+                    if self.boxes_intersect(current_box['bbox'], expanded_boxes[j]['bbox']):
+                        current_group.append(expanded_boxes[j])
+                        used[j] = True
+                        merged = True  # Đánh dấu đã có gộp
 
-                # Nếu khoảng cách đủ nhỏ -> cùng nhóm
-                if distance < 20:  # Ngưỡng cố định cho khoảng cách X
-                    current_group.append(current_element)
-                else:
-                    result_groups.append(current_group)
-                    current_group = [current_element]
+                # Gộp các box trong current_group
+                if len(current_group) > 1:
+                    merged_text = ""
+                    x_min = min(b['bbox'][0] for b in current_group)
+                    y_min = min(b['bbox'][1] for b in current_group)
+                    x_max = max(b['bbox'][0] + b['bbox'][2] for b in current_group)
+                    y_max = max(b['bbox'][1] + b['bbox'][3] for b in current_group)
 
-            # Thêm nhóm cuối cùng
-            if current_group:
-                result_groups.append(current_group)
+                    for k, elem in enumerate(current_group):
+                        if k > 0:
+                            # Thêm khoảng trắng (nếu cần)
+                            prev_elem = current_group[k-1]
+                            if elem['bbox'][0] > prev_elem["bbox"][0] + prev_elem['bbox'][2]:
+                                merged_text += " "
+                        merged_text += elem['text']
 
-            # Gộp các phần tử trong mỗi nhóm
-            for group in result_groups:
-                if len(group) == 1:
-                    merged_elements.append(group[0])
-                else:
-                    merged_text = " ".join(e.get('text', '') for e in group)
-
-                    # Tính toán bbox mới
-                    x_min = min(e['bbox'][0] for e in group)
-                    y_min = min(e['bbox'][1] for e in group)
-                    x_max = max(e['bbox'][0] + e['bbox'][2] for e in group)
-                    y_max = max(e['bbox'][1] + e['bbox'][3] for e in group)
-
-                    # Tạo element mới
-                    merged_element = {
+                    merged_boxes.append({
                         'bbox': (x_min, y_min, x_max - x_min, y_max - y_min),
                         'text': merged_text,
                         'type': 'text',
                         'merged': True,
-                        'confidence': max(e.get('confidence', 0) for e in group),
-                        'contour': group[0].get('contour'),
-                        'roi': group[0].get('roi')
-                    }
+                        'confidence': max(e.get('confidence', 0) for e in current_group),
+                        'roi': current_group[0].get('roi', None),
+                        'contour': current_group[0].get("contour",None)
+                    })
+                else:
+                    merged_boxes.append(current_box)  # Không gộp, thêm vào như cũ
 
-                    merged_elements.append(merged_element)
 
-        return merged_elements + non_text_elements
+            if not merged:  # Nếu không có cặp nào được gộp, dừng vòng lặp
+                break
+
+            expanded_boxes = merged_boxes  # Cập nhật danh sách box cho vòng lặp tiếp theo
+            merged_boxes = []
+        # --- (Hết phần gộp) ---
+
+        # 3. Khôi phục kích thước ban đầu cho các box KHÔNG bị gộp
+        final_boxes = []
+        for box in merged_boxes:
+            if not box.get('merged', False):  # Nếu box không được đánh dấu là đã gộp
+                # Khôi phục bbox và contour ban đầu
+                original_bbox = box['original_bbox']
+                original_contour = box.get('original_contour', None)  # Lấy original_contour, nếu có
+                final_boxes.append({
+                    'bbox': original_bbox,
+                    'text': box['text'],
+                    'type': 'text',
+                    'merged': False,
+                    'confidence': box['confidence'],
+                    'roi': box.get('roi', None),
+                    'contour': original_contour  # Khôi phục contour
+                })
+            else:
+                final_boxes.append(box)  # Giữ nguyên box đã gộp
+
+        return final_boxes + non_text_elements
+    
+    #Hàm check 2 box có intersect không
+    def boxes_intersect(self, bbox1, bbox2):
+        """Kiểm tra hai bounding box có giao nhau không."""
+        x1_a, y1_a, w_a, h_a = bbox1
+        x1_b, y1_b, w_b, h_b = bbox2
+
+        intersect_x1 = max(x1_a, x1_b)
+        intersect_y1 = max(y1_a, y1_b)
+        intersect_x2 = min(x1_a + w_a, x1_b + w_b)
+        intersect_y2 = min(y1_a + h_a, y1_b + h_b)
+
+        return intersect_x2 > intersect_x1 and intersect_y2 > intersect_y1
