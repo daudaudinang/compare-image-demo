@@ -1,9 +1,10 @@
 """Module hiển thị kết quả trực quan."""
 
 import cv2
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib
+import matplotlib.pyplot as plt
+from ui_comparator.analysis import DifferenceAnalyzer
+
 matplotlib.use('TkAgg')  # Sử dụng backend TkAgg thay vì Qt
 
 class ResultVisualizer:

@@ -8,7 +8,7 @@ from paddleocr import PaddleOCR
 
 class UISegmenter:
     """Phân đoạn các thành phần UI."""
-    
+
     def __init__(self):
         # Khởi tạo PaddleOCR (chỉ cần một lần)
         self.ocr = PaddleOCR(use_angle_cls=True, lang='vi', show_log=False)
@@ -29,16 +29,15 @@ class UISegmenter:
 
         # 5. Lọc các elements chồng lấn
         merged_elements = self.merge_hierarchical_boxes(all_elements)
-
         filtered_elements = self.filter_overlapping_elements(merged_elements)
 
         return filtered_elements
-    
+
     def detect_text(self, img):
         """Phát hiện text với PaddleOCR."""
         result = self.ocr.ocr(img, cls=True)
-        
         text_elements = []
+
         if result is not None:
             for line in result:
                 if line is not None:
@@ -46,7 +45,7 @@ class UISegmenter:
                         box = item[0]  # Bounding box: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
                         text = item[1][0]  # Text content
                         confidence = item[1][1]  # Confidence score
-                        
+
                         # Chuyển box thành x,y,w,h
                         x = min(int(box[0][0]), int(box[1][0]), int(box[2][0]), int(box[3][0]))
                         y = min(int(box[0][1]), int(box[1][1]), int(box[2][1]), int(box[3][1]))
@@ -54,7 +53,7 @@ class UISegmenter:
                         max_y = max(int(box[0][1]), int(box[1][1]), int(box[2][1]), int(box[3][1]))
                         w = max_x - x
                         h = max_y - y
-                        
+
                         # Lưu kết quả với độ tin cậy cao
                         if confidence > 0.5:
                             # Tạo contour từ box
@@ -64,13 +63,13 @@ class UISegmenter:
                                 [int(box[2][0]), int(box[2][1])],
                                 [int(box[3][0]), int(box[3][1])]
                             ], dtype=np.int32).reshape((-1, 1, 2))
-                            
+
                             # Đảm bảo ROI không vượt quá kích thước ảnh
                             y_safe = max(0, y)
                             x_safe = max(0, x)
                             h_safe = min(h, img.shape[0]-y_safe)
                             w_safe = min(w, img.shape[1]-x_safe)
-                            
+
                             # Kiểm tra xem ROI có hợp lệ không
                             if h_safe > 0 and w_safe > 0:
                                 text_elements.append({
@@ -81,18 +80,204 @@ class UISegmenter:
                                     'type': 'text',
                                     'roi': img[y_safe:y_safe+h_safe, x_safe:x_safe+w_safe].copy()
                                 })
-        
+
         return text_elements
 
+    def is_real_world_photo(self, img):
+        """Phát hiện xem ảnh có phải là ảnh thực tế hay không."""
+        # Chuyển sang grayscale
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+
+        # 1. Kiểm tra sự phân phối gradient
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        mean_gradient = np.mean(gradient_magnitude)
+
+        # 2. Tính histogram
+        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+        hist_var = np.var(hist)
+
+        # 3. Đếm số vùng riêng biệt sau khi phân ngưỡng
+        _, thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+        num_blobs, _ = cv2.connectedComponents(thresh)
+
+        # Ảnh thiết kế thường có số vùng riêng biệt nhiều hơn và gradient đồng đều hơn
+        # Ảnh thực tế thường có nhiều vùng liên tục và thay đổi gradient mạnh
+        is_real_world = (mean_gradient > 10 and hist_var > 1000) or num_blobs < 50
+
+        return is_real_world
+
+    def detect_edges(self, img):
+        """Phát hiện các UI element dựa trên cạnh kết hợp đa phương pháp tăng cường độ tương phản."""
+        # Định nghĩa hàm tính IoU
+        def calculate_iou(bbox1, bbox2):
+            x1, y1, w1, h1 = bbox1
+            x2, y2, w2, h2 = bbox2
+            # Tính tọa độ của phần giao nhau
+            x_left = max(x1, x2)
+            y_top = max(y1, y2)
+            x_right = min(x1 + w1, x2 + w2)
+            y_bottom = min(y1 + h1, y2 + h2)
+            # Nếu không có phần giao nhau
+            if x_right < x_left or y_bottom < y_top:
+                return 0.0
+            # Tính diện tích phần giao nhau
+            intersection_area = (x_right - x_left) * (y_bottom - y_top)
+            # Tính diện tích của từng bbox
+            bbox1_area = w1 * h1
+            bbox2_area = w2 * h2
+            # Tính IoU
+            union_area = bbox1_area + bbox2_area - intersection_area
+            iou = intersection_area / float(union_area)
+            return iou
+
+        # Hàm áp dụng gamma correction
+        def apply_gamma(gray, gamma=1.0):
+            # Normalization về khoảng [0,1]
+            normalized = gray / 255.0
+            # Áp dụng gamma correction
+            corrected = np.power(normalized, gamma)
+            # Chuyển về khoảng [0,255]
+            output = np.uint8(corrected * 255)
+            return output
+
+        # Hàm phát hiện contours - có sửa đổi
+        def detect_contours(img_gray, method_name, low_threshold=30, high_threshold=150):
+            # Áp dụng GaussianBlur để giảm nhiễu
+            kernel_size = (5, 5)
+            blurred = cv2.GaussianBlur(img_gray, kernel_size, 0)
+
+            # Sử dụng Canny để phát hiện cạnh
+            edges = cv2.Canny(blurred, low_threshold, high_threshold)
+
+            # Tăng cường cạnh với morphology
+            kernel = np.ones((3, 3), np.uint8)
+            dilated = cv2.dilate(edges, kernel, iterations=1)
+
+            # Tìm contour
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # Lọc contour
+            filtered_contours = []
+
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                # Lọc theo diện tích - GIẢM NGƯỠNG từ 0.3 xuống 0.15
+                if area > 100 and area < 0.15 * img.shape[0] * img.shape[1]:
+                    x, y, w, h = cv2.boundingRect(contour)
+
+                    # Đánh giá xem contour có hợp lệ với biên không
+                    border_valid = True
+
+                    # MỞ RỘNG ĐIỀU KIỆN loại bỏ contour lớn ở biên cho TẤT CẢ các phương pháp
+                    if (x <= 10 and w > img.shape[1] * 0.6) or \
+                       (y <= 10 and h > img.shape[0] * 0.6) or \
+                       (x + w >= img.shape[1] - 10 and w > img.shape[1] * 0.6) or \
+                       (y + h >= img.shape[0] - 10 and h > img.shape[0] * 0.6):
+                        border_valid = False
+
+                    # THÊM: Kiểm tra xem contour có chiếm quá nhiều diện tích của ảnh không
+                    frame_coverage = (w * h) / (img.shape[0] * img.shape[1])
+                    if frame_coverage > 0.5:  # Nếu chiếm hơn 50% diện tích ảnh
+                        border_valid = False
+
+                    # THÊM: Kiểm tra tỷ lệ diện tích/chu vi để phát hiện hình chữ nhật lớn
+                    perimeter = cv2.arcLength(contour, True)
+                    if perimeter > 0:  # Tránh chia cho 0
+                        area_perimeter_ratio = area / (perimeter * perimeter)
+                        # Hình chữ nhật hoàn hảo có tỷ lệ khoảng 1/16 = 0.0625
+                        if area_perimeter_ratio > 0.055 and frame_coverage > 0.3:
+                            border_valid = False
+
+                    if border_valid:
+                        # Đảm bảo ROI không vượt quá kích thước ảnh
+                        y_safe = max(0, y)
+                        x_safe = max(0, x)
+                        h_safe = min(h, img.shape[0] - y_safe)
+                        w_safe = min(w, img.shape[1] - x_safe)
+
+                        # Kiểm tra xem ROI có hợp lệ không
+                        if h_safe > 0 and w_safe > 0:
+                            filtered_contours.append({
+                                'bbox': (x, y, w, h),
+                                'contour_id': id(contour),  # Dùng id để xác định contour
+                                'type': 'edge',
+                                'method': method_name,
+                                'roi': img[y_safe:y_safe + h_safe, x_safe:x_safe + w_safe].copy()
+                            })
+
+            return filtered_contours
+
+        # Chuyển sang grayscale
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+
+        # Áp dụng các giá trị gamma
+        gamma_07 = apply_gamma(gray, 0.7)  # Gamma thấp - tốt cho vùng tối
+        gamma_25 = apply_gamma(gray, 2.5)  # Gamma cao - tốt cho vùng sáng có độ tương phản thấp
+        gamma_50 = apply_gamma(gray, 4.0)  # Gamma rất cao - tốt cho một số UI elements khó phát hiện
+
+        # THÊM: Điều chỉnh ngưỡng cho ảnh thực tế
+        is_real_photo = self.is_real_world_photo(img)
+
+        # Phát hiện contours với từng phương pháp và ngưỡng tương ứng
+        # ĐIỀU CHỈNH ngưỡng cho ảnh thực tế
+        if is_real_photo:
+            original_contours = detect_contours(gray, "Original", 20, 100)
+            gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 20, 100)
+            gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 15, 80)
+            gamma50_contours = detect_contours(gamma_50, "Gamma 5.0", 15, 80)
+        else:
+            original_contours = detect_contours(gray, "Original", 30, 150)
+            gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 30, 150)
+            gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 20, 100)
+            gamma50_contours = detect_contours(gamma_50, "Gamma 5.0", 20, 100)
+
+        # Kết hợp tất cả contours
+        all_contours = []
+        all_contours.extend(original_contours)
+        all_contours.extend(gamma07_contours)
+        all_contours.extend(gamma25_contours)
+        all_contours.extend(gamma50_contours)
+
+        # Lọc các contours trùng lặp dựa trên IoU
+        filtered_contours = []
+        for contour in all_contours:
+            # Kiểm tra xem contour này đã có trong kết quả chưa
+            is_new = True
+            current_bbox = contour['bbox']
+            for existing in filtered_contours:
+                if calculate_iou(current_bbox, existing['bbox']) > 0.5:
+                    is_new = False
+                    break
+            if is_new:
+                filtered_contours.append(contour)
+
+        return filtered_contours
+
     def merge_hierarchical_boxes(self, boxes, containment_threshold=0.7, overlap_threshold=0.5):
-        """
-        Gộp các bounding box theo quan hệ chứa nhau hoặc chồng lấn.
-        - Nếu box A chứa box B hoặc có phần giao lớn hơn ngưỡng overlap_threshold, thì A và B sẽ được gộp.
-        - containment_threshold: ngưỡng xác định box A chứa box B.
-        - overlap_threshold: ngưỡng xác định phần giao lớn giữa hai box.
-        """
+        """Gộp các bounding box theo quan hệ chứa nhau hoặc chồng lấn."""
         if len(boxes) <= 1:
             return boxes
+
+        # THÊM: Xác định xem có phần tử nào là từ ảnh thực tế không
+        has_real_world_elements = False
+        for box in boxes:
+            if 'roi' in box and box['roi'] is not None:
+                if self.is_real_world_photo(box['roi']):
+                    has_real_world_elements = True
+                    break
+
+        # THAY ĐỔI: Điều chỉnh ngưỡng cho ảnh thực tế
+        if has_real_world_elements:
+            containment_threshold = 0.5  # Giảm ngưỡng cho ảnh thực tế
+            overlap_threshold = 0.3
 
         # Sắp xếp boxes theo diện tích (lớn đến nhỏ)
         sorted_boxes = sorted(boxes, key=lambda x: x['bbox'][2] * x['bbox'][3], reverse=True)
@@ -109,7 +294,6 @@ class UISegmenter:
             i = 0
             while i < len(sorted_boxes):
                 candidate_box = sorted_boxes[i]
-
                 rect_a = current_box['bbox']
                 rect_b = candidate_box['bbox']
 
@@ -154,155 +338,15 @@ class UISegmenter:
             merged_box = {
                 'bbox': (x_min, y_min, w_new, h_new),
                 'contour': None,
-                'area': w_new * h_new,
+                'type': 'edge',
                 'method': 'merged',
                 'merged_count': len(current_group),
+                'roi': current_group[0].get('roi', None)
             }
 
             merged_boxes.append(merged_box)
 
-        print(f"Gộp phân cấp và chồng lấn: từ {len(boxes)} xuống còn {len(merged_boxes)} UI elements")
         return merged_boxes
-
-    def detect_edges(self, img):
-        """Phát hiện các UI element dựa trên cạnh kết hợp đa phương pháp tăng cường độ tương phản."""
-        import cv2
-        import numpy as np
-
-        # Định nghĩa hàm tính IoU
-        def calculate_iou(bbox1, bbox2):
-            x1, y1, w1, h1 = bbox1
-            x2, y2, w2, h2 = bbox2
-
-            # Tính tọa độ của phần giao nhau
-            x_left = max(x1, x2)
-            y_top = max(y1, y2)
-            x_right = min(x1 + w1, x2 + w2)
-            y_bottom = min(y1 + h1, y2 + h2)
-
-            # Nếu không có phần giao nhau
-            if x_right < x_left or y_bottom < y_top:
-                return 0.0
-
-            # Tính diện tích phần giao nhau
-            intersection_area = (x_right - x_left) * (y_bottom - y_top)
-
-            # Tính diện tích của từng bbox
-            bbox1_area = w1 * h1
-            bbox2_area = w2 * h2
-
-            # Tính IoU
-            union_area = bbox1_area + bbox2_area - intersection_area
-            iou = intersection_area / float(union_area)
-            return iou
-
-        # Hàm áp dụng gamma correction
-        def apply_gamma(gray, gamma=1.0):
-            # Normalization về khoảng [0,1]
-            normalized = gray / 255.0
-
-            # Áp dụng gamma correction
-            corrected = np.power(normalized, gamma)
-
-            # Chuyển về khoảng [0,255]
-            output = np.uint8(corrected * 255)
-
-            return output
-
-        # Hàm phát hiện contours
-        def detect_contours(img_gray, method_name, low_threshold=30, high_threshold=150):
-            # Áp dụng GaussianBlur để giảm nhiễu
-            kernel_size = (5, 5)
-            blurred = cv2.GaussianBlur(img_gray, kernel_size, 0)
-
-            # Sử dụng Canny để phát hiện cạnh
-            edges = cv2.Canny(blurred, low_threshold, high_threshold)
-
-            # Tăng cường cạnh với morphology
-            kernel = np.ones((3, 3), np.uint8)
-            dilated = cv2.dilate(edges, kernel, iterations=1)
-
-            # Tìm contour
-            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            # Lọc contour
-            filtered_contours = []
-            for contour in contours:
-                area = cv2.contourArea(contour)
-
-                # Lọc theo diện tích
-                if area > 100 and area < 0.3 * img.shape[0] * img.shape[1]:
-                    x, y, w, h = cv2.boundingRect(contour)
-
-                    # Đối với Gamma 5.0, lọc bỏ contour lớn ở biên
-                    border_valid = True
-                    if method_name == "Gamma 5.0" and (
-                            (x <= 5 and w > img.shape[1] * 0.7) or
-                            (y <= 5 and h > img.shape[0] * 0.7)):
-                        border_valid = False
-
-                    if border_valid:
-                        # Đảm bảo ROI không vượt quá kích thước ảnh
-                        y_safe = max(0, y)
-                        x_safe = max(0, x)
-                        h_safe = min(h, img.shape[0] - y_safe)
-                        w_safe = min(w, img.shape[1] - x_safe)
-
-                        # Kiểm tra xem ROI có hợp lệ không
-                        if h_safe > 0 and w_safe > 0:
-                            # Tạo đối tượng element mà không lưu contour để tránh lỗi so sánh
-                            # Lưu contour_id thay vì contour để có thể phân biệt
-                            filtered_contours.append({
-                                'bbox': (x, y, w, h),
-                                'contour_id': id(contour),  # Dùng id để xác định contour
-                                'type': 'edge',
-                                'method': method_name,
-                                'roi': img[y_safe:y_safe + h_safe, x_safe:x_safe + w_safe].copy()
-                            })
-
-            return filtered_contours
-
-        # Chuyển sang grayscale
-        if len(img.shape) == 3:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = img.copy()
-
-        # Áp dụng các giá trị gamma
-        gamma_07 = apply_gamma(gray, 0.7)  # Gamma thấp - tốt cho vùng tối
-        gamma_25 = apply_gamma(gray, 2.5)  # Gamma cao - tốt cho vùng sáng có độ tương phản thấp
-        gamma_50 = apply_gamma(gray, 4.0)  # Gamma rất cao - tốt cho một số UI elements khó phát hiện
-
-        # Phát hiện contours với từng phương pháp và ngưỡng tương ứng
-        original_contours = detect_contours(gray, "Original", 30, 150)
-        gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 30, 150)
-        gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 20, 100)
-        gamma50_contours = detect_contours(gamma_50, "Gamma 5.0", 20, 100)
-
-        # Kết hợp tất cả contours
-        all_contours = []
-        all_contours.extend(original_contours)
-        all_contours.extend(gamma07_contours)
-        all_contours.extend(gamma25_contours)
-        all_contours.extend(gamma50_contours)
-
-        # Lọc các contours trùng lặp dựa trên IoU
-        # Không lưu contour trong các đối tượng element để tránh lỗi so sánh
-        filtered_contours = []
-        for contour in all_contours:
-            # Kiểm tra xem contour này đã có trong kết quả chưa
-            is_new = True
-            current_bbox = contour['bbox']
-
-            for existing in filtered_contours:
-                if calculate_iou(current_bbox, existing['bbox']) > 0.5:
-                    is_new = False
-                    break
-
-            if is_new:
-                filtered_contours.append(contour)
-
-        return filtered_contours
 
     def filter_overlapping_elements(self, elements):
         """
@@ -328,7 +372,6 @@ class UISegmenter:
         for i in range(len(sorted_elements)):
             if i in used:
                 continue
-
             current = sorted_elements[i]
             result.append(current)
             used.add(i)
@@ -337,7 +380,6 @@ class UISegmenter:
             for j in range(i + 1, len(sorted_elements)):
                 if j in used:
                     continue
-
                 if self.is_contained(current['bbox'], sorted_elements[j]['bbox']):
                     used.add(j)
 
@@ -384,13 +426,11 @@ class UISegmenter:
 
         for i in range(1, len(text_elements)):
             curr_elem = text_elements[i]
-
             # So sánh với tất cả elements trong dòng hiện tại
             min_vertical_distance = float('inf')
             for prev_elem in current_line:
                 _, y1, _, h1 = prev_elem['bbox']
                 _, y2, _, h2 = curr_elem['bbox']
-
                 # Tính khoảng cách giữa tâm điểm theo chiều dọc
                 distance = abs((y1 + h1 / 2) - (y2 + h2 / 2))
                 min_vertical_distance = min(min_vertical_distance, distance)
@@ -431,7 +471,6 @@ class UISegmenter:
                         prev_elem = line[i - 1]
                         prev_end_x = prev_elem['bbox'][0] + prev_elem['bbox'][2]
                         curr_start_x = elem['bbox'][0]
-
                         # Nếu khoảng cách giữa các từ đủ lớn
                         if curr_start_x - prev_end_x > min(prev_elem['bbox'][2], elem['bbox'][2]) * 0.2:
                             merged_text += " "
@@ -460,23 +499,28 @@ class UISegmenter:
         if not text_elements:
             return elements
 
-        # --- (Phần mở rộng bbox và gộp giữ nguyên) ---
         # 1. Mở rộng bbox
         expanded_boxes = []
         for elem in text_elements:
             x, y, w, h = elem['bbox']
             y_top_expansion = int(h * 0.25)  # 25% chiều cao
             y_bottom_expansion = int(h * 0.25)
+            x_left_expansion = int(h * 0.5)
+            x_right_expansion = int(h * 0.5)
 
+            new_x = max(0, x - x_left_expansion)  # Đảm bảo không vượt quá biên trái
             new_y = max(0, y - y_top_expansion)  # Đảm bảo không vượt quá biên trên
+
+            new_w = w + x_left_expansion + x_right_expansion
             new_h = h + y_top_expansion + y_bottom_expansion
 
             # Cập nhật cả 'bbox' và 'contour' (nếu có)
-            new_bbox = (x, new_y, w, new_h)
+            new_bbox = (new_x, new_y, new_w, new_h)
             new_contour = None
             if 'contour' in elem and elem['contour'] is not None:  # Kiểm tra contour
                 # Cập nhật contour (giả sử contour là một numpy array)
                 new_contour = elem['contour'].copy()
+                new_contour[:, 0, 0] = new_contour[:, 0, 0] - x + new_x
                 new_contour[:, 0, 1] = new_contour[:, 0, 1] - y + new_y
 
             expanded_boxes.append({
@@ -486,9 +530,9 @@ class UISegmenter:
                 'merged': False,  # Ban đầu, chưa box nào được gộp
                 'confidence': elem.get('confidence', 0),
                 'roi': elem.get('roi', None),
-                'contour':new_contour,
-                'original_bbox': elem['bbox'], #Lưu lại original
-                'original_contour': elem.get('contour',None) #Lưu lại original
+                'contour': new_contour,
+                'original_bbox': elem['bbox'],  # Lưu lại original
+                'original_contour': elem.get('contour', None)  # Lưu lại original
             })
 
         # 2. Kiểm tra giao nhau và gộp
@@ -537,26 +581,25 @@ class UISegmenter:
                         'merged': True,
                         'confidence': max(e.get('confidence', 0) for e in current_group),
                         'roi': current_group[0].get('roi', None),
-                        'contour': current_group[0].get("contour",None)
+                        'contour': current_group[0].get("contour", None)
                     })
                 else:
                     merged_boxes.append(current_box)  # Không gộp, thêm vào như cũ
-
 
             if not merged:  # Nếu không có cặp nào được gộp, dừng vòng lặp
                 break
 
             expanded_boxes = merged_boxes  # Cập nhật danh sách box cho vòng lặp tiếp theo
             merged_boxes = []
-        # --- (Hết phần gộp) ---
 
         # 3. Khôi phục kích thước ban đầu cho các box KHÔNG bị gộp
         final_boxes = []
-        for box in merged_boxes:
+        for box in expanded_boxes:
             if not box.get('merged', False):  # Nếu box không được đánh dấu là đã gộp
                 # Khôi phục bbox và contour ban đầu
                 original_bbox = box['original_bbox']
                 original_contour = box.get('original_contour', None)  # Lấy original_contour, nếu có
+
                 final_boxes.append({
                     'bbox': original_bbox,
                     'text': box['text'],
@@ -570,8 +613,7 @@ class UISegmenter:
                 final_boxes.append(box)  # Giữ nguyên box đã gộp
 
         return final_boxes + non_text_elements
-    
-    #Hàm check 2 box có intersect không
+
     def boxes_intersect(self, bbox1, bbox2):
         """Kiểm tra hai bounding box có giao nhau không."""
         x1_a, y1_a, w_a, h_a = bbox1

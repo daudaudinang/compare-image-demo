@@ -2,16 +2,16 @@
 
 import os
 import sys
-import cv2
-import matplotlib.pyplot as plt
+
 import matplotlib
+
 matplotlib.use('TkAgg')  # Sử dụng backend TkAgg
 
 # Thêm thư mục cha vào sys.path để import được module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ui_comparator.preprocessing import Preprocessor
-from ui_comparator.segmentation import UISegmenter
+from ui_comparator.segmentation2 import UISegmenter
 from ui_comparator.matching import ElementMatcher
 from ui_comparator.analysis import DifferenceAnalyzer
 from ui_comparator.visualization import ResultVisualizer
@@ -19,8 +19,8 @@ from ui_comparator.visualization import ResultVisualizer
 def main():
     """Chạy demo so sánh UI."""
     # Đường dẫn đến ảnh mẫu
-    design_path = os.path.join('sample_images', 'design1.png')
-    real_path = os.path.join('sample_images', 'real1.jpg')
+    design_path = os.path.join('sample_images', 'design2.jpg')
+    real_path = os.path.join('sample_images', 'real2.jpg')
     
     print("=== BẮT ĐẦU SO SÁNH UI ===")
     
