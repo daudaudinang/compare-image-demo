@@ -19,8 +19,8 @@ from ui_comparator.visualization import ResultVisualizer
 def main():
     """Chạy demo so sánh UI."""
     # Đường dẫn đến ảnh mẫu
-    design_path = os.path.join('sample_images', 'design2.jpg')
-    real_path = os.path.join('sample_images', 'real2.jpg')
+    design_path = os.path.join('sample_images', 'design1.png')
+    real_path = os.path.join('sample_images', 'real1.jpg')
     
     print("=== BẮT ĐẦU SO SÁNH UI ===")
     

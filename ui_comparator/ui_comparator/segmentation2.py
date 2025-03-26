@@ -2,7 +2,6 @@
 
 import cv2
 import numpy as np
-from sklearn.cluster import KMeans
 import paddleocr
 from paddleocr import PaddleOCR
 
@@ -27,17 +26,41 @@ class UISegmenter:
         # 4. Kết hợp tất cả elements
         all_elements = merged_texts + edge_elements
 
+        elements_after_adjacent_merge = self.merge_adjacent_elements(
+            all_elements,
+            max_gap_h=8,  # Ngưỡng khoảng cách ngang (pixel)
+            min_overlap_ratio=0.1  # Ngưỡng chồng lấn tối thiểu (tỷ lệ 0 đến 1)
+        )
+
         # 5. Lọc các elements chồng lấn
-        merged_elements = self.merge_hierarchical_boxes(all_elements)
+        merged_elements = self.merge_hierarchical_boxes(elements_after_adjacent_merge)
+
         filtered_elements = self.filter_overlapping_elements(merged_elements)
 
         return filtered_elements
 
-    def detect_text(self, img):
-        """Phát hiện text với PaddleOCR."""
-        result = self.ocr.ocr(img, cls=True)
-        text_elements = []
+    def unsharp_mask(self, image, sigma=1.0, strength=1.5):
+        """Áp dụng unsharp mask để làm sắc nét ảnh."""
+        # Áp dụng Gaussian blur
+        blurred = cv2.GaussianBlur(image, (0, 0), sigma)
 
+        # Kết hợp ảnh gốc và ảnh làm mờ để tạo ảnh sắc nét
+        sharpened = cv2.addWeighted(image, 1.0 + strength, blurred, -strength, 0)
+
+        # Đảm bảo giá trị pixel nằm trong khoảng [0, 255]
+        sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+
+        return sharpened
+
+    def detect_text(self, img):
+        """Phát hiện text với PaddleOCR kết hợp unsharp mask."""
+        # Áp dụng unsharp mask để tăng độ sắc nét trước khi OCR
+        sharpened_img = self.unsharp_mask(img, sigma=1.0, strength=1.5)
+
+        # Thực hiện OCR trên ảnh đã được làm sắc nét
+        result = self.ocr.ocr(sharpened_img, cls=True)
+
+        text_elements = []
         if result is not None:
             for line in result:
                 if line is not None:
@@ -55,7 +78,7 @@ class UISegmenter:
                         h = max_y - y
 
                         # Lưu kết quả với độ tin cậy cao
-                        if confidence > 0.5:
+                        if confidence > 0.1:
                             # Tạo contour từ box
                             contour = np.array([
                                 [int(box[0][0]), int(box[0][1])],
@@ -67,8 +90,8 @@ class UISegmenter:
                             # Đảm bảo ROI không vượt quá kích thước ảnh
                             y_safe = max(0, y)
                             x_safe = max(0, x)
-                            h_safe = min(h, img.shape[0]-y_safe)
-                            w_safe = min(w, img.shape[1]-x_safe)
+                            h_safe = min(h, img.shape[0] - y_safe)
+                            w_safe = min(w, img.shape[1] - x_safe)
 
                             # Kiểm tra xem ROI có hợp lệ không
                             if h_safe > 0 and w_safe > 0:
@@ -78,9 +101,8 @@ class UISegmenter:
                                     'text': text,
                                     'confidence': confidence,
                                     'type': 'text',
-                                    'roi': img[y_safe:y_safe+h_safe, x_safe:x_safe+w_safe].copy()
+                                    'roi': img[y_safe:y_safe + h_safe, x_safe:x_safe + w_safe].copy()
                                 })
-
         return text_elements
 
     def is_real_world_photo(self, img):
@@ -232,12 +254,12 @@ class UISegmenter:
             original_contours = detect_contours(gray, "Original", 20, 100)
             gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 20, 100)
             gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 15, 80)
-            gamma50_contours = detect_contours(gamma_50, "Gamma 5.0", 15, 80)
+            gamma50_contours = detect_contours(gamma_50, "Gamma 4.0", 15, 80)
         else:
             original_contours = detect_contours(gray, "Original", 30, 150)
             gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 30, 150)
             gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 20, 100)
-            gamma50_contours = detect_contours(gamma_50, "Gamma 5.0", 20, 100)
+            gamma50_contours = detect_contours(gamma_50, "Gamma 4.0", 20, 100)
 
         # Kết hợp tất cả contours
         all_contours = []
@@ -505,8 +527,8 @@ class UISegmenter:
             x, y, w, h = elem['bbox']
             y_top_expansion = int(h * 0.25)  # 25% chiều cao
             y_bottom_expansion = int(h * 0.25)
-            x_left_expansion = int(h * 0.5)
-            x_right_expansion = int(h * 0.5)
+            x_left_expansion = int(h * 0)
+            x_right_expansion = int(h * 0)
 
             new_x = max(0, x - x_left_expansion)  # Đảm bảo không vượt quá biên trái
             new_y = max(0, y - y_top_expansion)  # Đảm bảo không vượt quá biên trên
@@ -625,3 +647,174 @@ class UISegmenter:
         intersect_y2 = min(y1_a + h_a, y1_b + h_b)
 
         return intersect_x2 > intersect_x1 and intersect_y2 > intersect_y1
+
+    def calculate_union_bbox(self, bboxes):
+        """Tính bounding box bao chứa (union) của nhiều bounding box."""
+        if not bboxes:
+            return None
+        bboxes_np = np.array([b[:4] for b in bboxes])  # Lấy x, y, w, h
+        min_x = np.min(bboxes_np[:, 0])
+        min_y = np.min(bboxes_np[:, 1])
+        max_x2 = np.max(bboxes_np[:, 0] + bboxes_np[:, 2])
+        max_y2 = np.max(bboxes_np[:, 1] + bboxes_np[:, 3])
+        return [int(min_x), int(min_y), int(max_x2 - min_x), int(max_y2 - min_y)]
+
+    def check_horizontal_adjacency(self, bbox1, bbox2, max_gap_h, min_overlap_ratio=0.1):
+        """Kiểm tra xem bbox2 có kề ngang với bbox1 không."""
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+        x1_end = x1 + w1
+        x2_end = x2 + w2
+
+        # 1. Tính khoảng cách ngang giữa 2 box
+        horizontal_gap = max(0, x2 - x1_end) if x2 > x1 else max(0, x1 - x2_end)
+
+        # 2. Nếu khoảng cách ngang lớn hơn ngưỡng thì không kề
+        if horizontal_gap > max_gap_h:
+            return False
+
+        # 3. Tính chồng lấn theo chiều dọc (vertical overlap)
+        overlap_y1 = max(y1, y2)
+        overlap_y2 = min(y1 + h1, y2 + h2)
+        overlap_height = max(0, overlap_y2 - overlap_y1)
+
+        # 4. Kiểm tra xem tỷ lệ chồng lấn dọc có đủ lớn không
+        #    So với chiều cao của box nhỏ hơn
+        min_height = min(h1, h2)
+        if min_height == 0: return False  # Tránh chia cho 0
+        overlap_ratio = overlap_height / min_height
+
+        return overlap_ratio >= min_overlap_ratio
+
+    def check_vertical_adjacency(self, bbox1, bbox2, max_gap_v, min_overlap_ratio=0.1):
+        """Kiểm tra xem bbox2 có kề dọc với bbox1 không."""
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+        y1_end = y1 + h1
+        y2_end = y2 + h2
+
+        # 1. Tính khoảng cách dọc giữa 2 box
+        vertical_gap = max(0, y2 - y1_end) if y2 > y1 else max(0, y1 - y2_end)
+
+        # 2. Nếu khoảng cách dọc lớn hơn ngưỡng thì không kề
+        if vertical_gap > max_gap_v:
+            return False
+
+        # 3. Tính chồng lấn theo chiều ngang (horizontal overlap)
+        overlap_x1 = max(x1, x2)
+        overlap_x2 = min(x1 + w1, x2 + w2)
+        overlap_width = max(0, overlap_x2 - overlap_x1)
+
+        # 4. Kiểm tra xem tỷ lệ chồng lấn ngang có đủ lớn không
+        #    So với chiều rộng của box nhỏ hơn
+        min_width = min(w1, w2)
+        if min_width == 0: return False  # Tránh chia cho 0
+        overlap_ratio = overlap_width / min_width
+
+        return overlap_ratio >= min_overlap_ratio
+
+    def merge_adjacent_elements(self, elements, max_gap_h=5, min_overlap_ratio=0.1):
+        """
+        Gộp các elements kề nhau (theo chiều ngang) một cách lặp đi lặp lại.
+        elements: list of element dictionaries (phải có 'bbox')
+        max_gap_h: Khoảng cách ngang tối đa để coi là kề.
+        min_overlap_ratio: Tỷ lệ chồng lấn tối thiểu theo chiều còn lại để coi là kề.
+        """
+        if len(elements) < 2:
+            return elements
+
+        current_elements = elements[:]  # Làm việc trên bản copy
+
+        while True:
+            merged_something_in_pass = False
+            merged_indices = set()
+            next_elements = []
+            num_elements = len(current_elements)
+
+            # Sắp xếp có thể giúp ổn định nhưng không bắt buộc
+            # current_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
+
+            for i in range(num_elements):
+                if i in merged_indices:
+                    continue
+
+                elem1 = current_elements[i]
+                candidates_for_merging = [elem1]  # Bắt đầu nhóm với chính nó
+                bbox_group = [elem1['bbox']]
+
+                # Tìm tất cả các element khác kề với element hiện tại (elem1)
+                for j in range(i + 1, num_elements):
+                    if j in merged_indices:
+                        continue
+
+                    elem2 = current_elements[j]
+
+                    # Kiểm tra kề ngang HOẶC kề dọc
+                    is_adj = self.check_horizontal_adjacency(elem1['bbox'], elem2['bbox'], max_gap_h,
+                                                             min_overlap_ratio)
+
+                    # Nâng cao: Có thể kiểm tra kề với TOÀN BỘ nhóm đang xây dựng thay vì chỉ với elem1
+                    # union_so_far = self.calculate_union_bbox(bbox_group)
+                    # is_adj = self.check_horizontal_adjacency(union_so_far, elem2['bbox'], max_gap_h, min_overlap_ratio) or \
+                    #          self.check_vertical_adjacency(union_so_far, elem2['bbox'], max_gap_v, min_overlap_ratio)
+
+                    if is_adj:
+                        # Nếu kề, thêm vào nhóm và đánh dấu để loại bỏ
+                        candidates_for_merging.append(elem2)
+                        bbox_group.append(elem2['bbox'])
+                        merged_indices.add(j)
+                        merged_something_in_pass = True  # Đã có sự gộp trong lượt này
+
+                # Nếu tìm thấy ít nhất một element khác để gộp với elem1
+                if len(candidates_for_merging) > 1:
+                    # Tính union bbox cho cả nhóm
+                    union_bbox = self.calculate_union_bbox(bbox_group)
+
+                    # Tạo element mới đã gộp
+                    # Ưu tiên type 'text' nếu có text trong nhóm, nếu không giữ type của element đầu tiên
+                    merged_type = 'group'  # Mặc định
+                    merged_text = ""
+                    has_text = False
+                    types_in_group = set()
+                    for elem in candidates_for_merging:
+                        types_in_group.add(elem.get('type'))
+                        if elem.get('text'):
+                            has_text = True
+                            # Nối text theo vị trí (đơn giản hóa: nối ngang trước, dọc sau)
+                            # Cần logic phức tạp hơn để nối chính xác dựa trên vị trí tương đối
+                            merged_text += elem['text'] + " "  # Cần cách nối thông minh hơn
+
+                    if has_text:
+                        merged_type = 'text'
+                        merged_text = merged_text.strip()
+                    elif 'edge' in types_in_group:
+                        merged_type = 'edge'  # Ưu tiên giữ edge nếu gộp các edge
+                    else:
+                        merged_type = candidates_for_merging[0].get('type', 'group')
+
+                    merged_elem = {
+                        'id': f"adj_merged_{i}",
+                        'bbox': union_bbox,
+                        'type': merged_type,
+                        'text': merged_text if has_text else "",
+                        # 'roi': None # ROI cần tính lại sau
+                    }
+                    next_elements.append(merged_elem)
+                    merged_indices.add(i)  # Đánh dấu cả element gốc của nhóm
+                else:
+                    # Nếu không gộp với ai, giữ nguyên elem1
+                    next_elements.append(elem1)
+
+            # Cập nhật danh sách elements cho vòng lặp tiếp theo
+            current_elements = next_elements
+
+            # Nếu không có gì được gộp trong lượt này -> dừng
+            if not merged_something_in_pass:
+                break
+
+        # Gán lại ID nếu cần
+        for idx, elem in enumerate(current_elements):
+            elem['id'] = elem.get('id', f'final_adj_{idx}')
+
+        print(f"After adjacent merge loop: {len(current_elements)} elements.")  # Debug
+        return current_elements
