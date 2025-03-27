@@ -29,6 +29,7 @@ class UISegmenter:
         elements_after_adjacent_merge = self.merge_adjacent_elements(
             all_elements,
             max_gap_h=8,  # Ngưỡng khoảng cách ngang (pixel)
+            max_gap_v=5,  # Ngưỡng khoảng cách dọc (pixel)
             min_overlap_ratio=0.1  # Ngưỡng chồng lấn tối thiểu (tỷ lệ 0 đến 1)
         )
 
@@ -713,15 +714,18 @@ class UISegmenter:
 
         return overlap_ratio >= min_overlap_ratio
 
-    def merge_adjacent_elements(self, elements, max_gap_h=5, min_overlap_ratio=0.1):
+    def merge_adjacent_elements(self, elements, max_gap_h=5, max_gap_v=5, min_overlap_ratio=0.1): # Thêm max_gap_v
         """
-        Gộp các elements kề nhau (theo chiều ngang) một cách lặp đi lặp lại.
+        Gộp các elements kề nhau (theo chiều ngang HOẶC dọc) một cách lặp đi lặp lại.
         elements: list of element dictionaries (phải có 'bbox')
         max_gap_h: Khoảng cách ngang tối đa để coi là kề.
+        max_gap_v: Khoảng cách dọc tối đa để coi là kề. # Tham số mới
         min_overlap_ratio: Tỷ lệ chồng lấn tối thiểu theo chiều còn lại để coi là kề.
         """
         if len(elements) < 2:
             return elements
+
+        print(f"Trước khi gộp kề: {len(elements)} elements.") # Debug
 
         current_elements = elements[:]  # Làm việc trên bản copy
 
@@ -731,79 +735,80 @@ class UISegmenter:
             next_elements = []
             num_elements = len(current_elements)
 
-            # Sắp xếp có thể giúp ổn định nhưng không bắt buộc
-            # current_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
+            # Sắp xếp theo y rồi x có thể giúp ổn định hơn một chút
+            current_elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
 
             for i in range(num_elements):
                 if i in merged_indices:
                     continue
 
                 elem1 = current_elements[i]
-                candidates_for_merging = [elem1]  # Bắt đầu nhóm với chính nó
+                candidates_for_merging = [elem1]
                 bbox_group = [elem1['bbox']]
 
-                # Tìm tất cả các element khác kề với element hiện tại (elem1)
+                # --- Thay đổi ở đây: Kiểm tra kề ngang HOẶC dọc ---
+                # Tìm các element kề với elem1 HOẶC kề với union_bbox của nhóm đang xây dựng
+                # (Kiểm tra với union_bbox giúp gộp được chuỗi dài hơn)
+                current_union_bbox = elem1['bbox'] # Bbox bao của nhóm hiện tại
+
                 for j in range(i + 1, num_elements):
                     if j in merged_indices:
                         continue
 
                     elem2 = current_elements[j]
 
-                    # Kiểm tra kề ngang HOẶC kề dọc
-                    is_adj = self.check_horizontal_adjacency(elem1['bbox'], elem2['bbox'], max_gap_h,
-                                                             min_overlap_ratio)
-
-                    # Nâng cao: Có thể kiểm tra kề với TOÀN BỘ nhóm đang xây dựng thay vì chỉ với elem1
-                    # union_so_far = self.calculate_union_bbox(bbox_group)
-                    # is_adj = self.check_horizontal_adjacency(union_so_far, elem2['bbox'], max_gap_h, min_overlap_ratio) or \
-                    #          self.check_vertical_adjacency(union_so_far, elem2['bbox'], max_gap_v, min_overlap_ratio)
+                    # Kiểm tra xem elem2 có kề với bbox bao hiện tại của nhóm không
+                    is_adj = self.check_horizontal_adjacency(current_union_bbox, elem2['bbox'], max_gap_h, min_overlap_ratio) or \
+                             self.check_vertical_adjacency(current_union_bbox, elem2['bbox'], max_gap_v, min_overlap_ratio)
+                    # -------------------------------------------------
 
                     if is_adj:
-                        # Nếu kề, thêm vào nhóm và đánh dấu để loại bỏ
+                        # Nếu kề, thêm vào nhóm, cập nhật union_bbox và đánh dấu
                         candidates_for_merging.append(elem2)
                         bbox_group.append(elem2['bbox'])
                         merged_indices.add(j)
-                        merged_something_in_pass = True  # Đã có sự gộp trong lượt này
+                        merged_something_in_pass = True
+                        # Cập nhật bbox bao của nhóm
+                        current_union_bbox = self.calculate_union_bbox(bbox_group)
+
 
                 # Nếu tìm thấy ít nhất một element khác để gộp với elem1
                 if len(candidates_for_merging) > 1:
-                    # Tính union bbox cho cả nhóm
-                    union_bbox = self.calculate_union_bbox(bbox_group)
+                    # Union bbox cuối cùng cho nhóm (đã được tính ở current_union_bbox)
+                    union_bbox = current_union_bbox
 
-                    # Tạo element mới đã gộp
-                    # Ưu tiên type 'text' nếu có text trong nhóm, nếu không giữ type của element đầu tiên
-                    merged_type = 'group'  # Mặc định
-                    merged_text = ""
-                    has_text = False
-                    types_in_group = set()
+                    # Tạo element mới đã gộp (logic giữ nguyên)
+                    merged_type = 'group'; merged_text = ""; has_text = False; types_in_group = set()
                     for elem in candidates_for_merging:
                         types_in_group.add(elem.get('type'))
-                        if elem.get('text'):
+                        elem_text = elem.get('text')
+                        if elem_text and elem_text.strip():
                             has_text = True
-                            # Nối text theo vị trí (đơn giản hóa: nối ngang trước, dọc sau)
-                            # Cần logic phức tạp hơn để nối chính xác dựa trên vị trí tương đối
-                            merged_text += elem['text'] + " "  # Cần cách nối thông minh hơn
+                            # Lưu ý: Cách nối text này vẫn đơn giản, có thể không đúng thứ tự khi gộp dọc
+                            merged_text += elem_text + " "
 
                     if has_text:
-                        merged_type = 'text'
-                        merged_text = merged_text.strip()
+                        merged_type = 'text'; merged_text = merged_text.strip()
                     elif 'edge' in types_in_group:
-                        merged_type = 'edge'  # Ưu tiên giữ edge nếu gộp các edge
-                    else:
-                        merged_type = candidates_for_merging[0].get('type', 'group')
+                        merged_type = 'edge'
+                    elif candidates_for_merging: # Lấy type của cái đầu tiên nếu có
+                         merged_type = candidates_for_merging[0].get('type', 'group')
+
 
                     merged_elem = {
-                        'id': f"adj_merged_{i}",
+                        'id': f"adj_merged_{i}", # Tạo id mới
                         'bbox': union_bbox,
                         'type': merged_type,
-                        'text': merged_text if has_text else "",
-                        # 'roi': None # ROI cần tính lại sau
+                        'text': merged_text,
+                        'roi': candidates_for_merging[0].get('roi') # Giữ ROI của cái đầu (có thể cần cải thiện)
+                        # Các thuộc tính khác có thể cần được tổng hợp nếu muốn
                     }
                     next_elements.append(merged_elem)
-                    merged_indices.add(i)  # Đánh dấu cả element gốc của nhóm
+                    merged_indices.add(i) # Đánh dấu cả element gốc của nhóm
                 else:
                     # Nếu không gộp với ai, giữ nguyên elem1
-                    next_elements.append(elem1)
+                    if i not in merged_indices: # Chỉ thêm nếu chưa bị gộp vào nhóm khác
+                        next_elements.append(elem1)
 
             # Cập nhật danh sách elements cho vòng lặp tiếp theo
             current_elements = next_elements
@@ -812,9 +817,8 @@ class UISegmenter:
             if not merged_something_in_pass:
                 break
 
-        # Gán lại ID nếu cần
-        for idx, elem in enumerate(current_elements):
-            elem['id'] = elem.get('id', f'final_adj_{idx}')
-
-        print(f"After adjacent merge loop: {len(current_elements)} elements.")  # Debug
+        print(f"Sau khi gộp kề (ngang/dọc): {len(current_elements)} elements.") # Debug
+        # Gán lại ID cuối cùng nếu cần
+        # for idx, elem in enumerate(current_elements):
+        #    elem['id'] = elem.get('id', f'final_adj_{idx}')
         return current_elements
