@@ -1,19 +1,21 @@
 name: ui-comparator
 channels:
-  - conda-forge
+  - conda-forge # Nên giữ conda-forge để có nhiều gói hơn
   - defaults
 dependencies:
   - python=3.8
   - pip
   - numpy
-  - opencv
-  - scikit-image
-  - scikit-learn
-  - matplotlib
-  - pytorch
-  - pillow
-  - scipy
+  - opencv # Cần cho cv2 trong các file xử lý ảnh
+  - scikit-image # Cần cho ssim trong analysis.py và matching.py (cũ)
+  - scikit-learn # Cần cho cosine_similarity trong matching2.py
+  - matplotlib # Cần cho visualization.py
+  - pytorch # Rất quan trọng, cần cho transformers/DINOv2
+  - pillow # Cần cho PIL (trong matching2.py, visualization.py) và nhiều thư viện khác
+  - scipy # Cần cho linear_sum_assignment trong matching2.py
+
   - pip:
-    - paddlepaddle
-    - paddleocr
-    - transformers
+    - paddlepaddle # Cần cho paddleocr
+    - paddleocr # Cần cho segmentation2.py
+    - transformers # Rất quan trọng, cần cho DINOv2 trong matching2.py
+    - openai>=1.69.0 # Thêm thư viện openai để gọi API Gemini

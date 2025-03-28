@@ -14,7 +14,7 @@ from ui_comparator.preprocessing import Preprocessor
 from ui_comparator.segmentation2 import UISegmenter
 from ui_comparator.matching2 import ElementMatcher
 from ui_comparator.analysis import DifferenceAnalyzer
-from ui_comparator.visualization import ResultVisualizer
+from ui_comparator.visualization2 import ResultVisualizer
 
 def main():
     """Chạy demo so sánh UI."""
