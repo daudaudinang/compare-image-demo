@@ -244,7 +244,7 @@ class UISegmenter:
         # Áp dụng các giá trị gamma
         gamma_07 = apply_gamma(gray, 0.7)  # Gamma thấp - tốt cho vùng tối
         gamma_25 = apply_gamma(gray, 2.5)  # Gamma cao - tốt cho vùng sáng có độ tương phản thấp
-        gamma_50 = apply_gamma(gray, 4.0)  # Gamma rất cao - tốt cho một số UI elements khó phát hiện
+        gamma_40 = apply_gamma(gray, 4.0)  # Gamma rất cao - tốt cho một số UI elements khó phát hiện
 
         # THÊM: Điều chỉnh ngưỡng cho ảnh thực tế
         is_real_photo = self.is_real_world_photo(img)
@@ -255,12 +255,12 @@ class UISegmenter:
             original_contours = detect_contours(gray, "Original", 20, 100)
             gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 20, 100)
             gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 15, 80)
-            gamma50_contours = detect_contours(gamma_50, "Gamma 4.0", 15, 80)
+            gamma50_contours = detect_contours(gamma_40, "Gamma 4.0", 15, 80)
         else:
             original_contours = detect_contours(gray, "Original", 30, 150)
             gamma07_contours = detect_contours(gamma_07, "Gamma 0.7", 30, 150)
             gamma25_contours = detect_contours(gamma_25, "Gamma 2.5", 20, 100)
-            gamma50_contours = detect_contours(gamma_50, "Gamma 4.0", 20, 100)
+            gamma50_contours = detect_contours(gamma_40, "Gamma 4.0", 20, 100)
 
         # Kết hợp tất cả contours
         all_contours = []
